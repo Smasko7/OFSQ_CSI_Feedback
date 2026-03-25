@@ -33,13 +33,13 @@ dataset_type = "Outdoor"
 
 
 if dataset_type == "Indoor":
-    test_data = loadmat('DATA_Htestin.mat')
+    test_data = loadmat('../../data/DATA_Htestin.mat')
     H_test = test_data.get('HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
     # first 1024 columns (32X32): real part and the rest 1024 columns: imaginary part
 
 
-    train_data = loadmat('DATA_Htrainin.mat')
+    train_data = loadmat('../../data/DATA_Htrainin.mat')
     H_train = train_data.get('HT')            # (100000, 2048) --> 100000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
 
     H_train = H_train.astype('float32')
@@ -63,13 +63,13 @@ if dataset_type == "Indoor":
 
 
 if dataset_type == "Outdoor":
-    test_data = loadmat('DATA_Htestout.mat')
+    test_data = loadmat('../../data/DATA_Htestout.mat')
     H_test = test_data.get(
         'HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
     # first 1024 columns (32X32): real part and the rest 1024 columns: imaginary part
  
-    train_data = loadmat('DATA_Htrainout.mat')
+    train_data = loadmat('../../data/DATA_Htrainout.mat')
     H_train = train_data.get(
         'HT')  # (100000, 2048) --> 100000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
 
@@ -268,12 +268,12 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 
 # SAVE THE PLOT
-plot_path = "FSQ_CRNet_rec_loss.png"
+plot_path = "../../outputs/plots/FSQ_CRNet_rec_loss.png"
 plt.savefig(plot_path)
 print(f"Plot saved to {plot_path}")
 
 # Save the losses to a text file
-losses_file_path = "FSQ_CRNet_rec_losses.txt"
+losses_file_path = "../../outputs/logs/FSQ_CRNet_rec_losses.txt"
 with open(losses_file_path, 'w') as f:
     for loss in losses:
         f.write(f"{loss}\n")
@@ -290,7 +290,7 @@ print("\nTraining time elapsed = ", end-start, " sec")
 # ====================================================================================================================================
 #SAVE MODEL
 
-model_path = "FSQ_CRNet_path.pth"
+model_path = "../../outputs/models/FSQ_CRNet_path.pth"
 torch.save(model.state_dict(), model_path)
 print(f"Model saved to {model_path}")
 

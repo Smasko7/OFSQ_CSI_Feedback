@@ -1,3 +1,4 @@
+from collections import OrderedDict
 import torch
 import torchvision
 import torchvision.transforms as transforms
@@ -15,13 +16,13 @@ import matplotlib.pyplot as plt
 
 
 
-
 start = time.time()
 
 
 Nt = 32  # base station antennas
 Nc = 32  # subcarriers (after DFT)
 img_channels = 2
+M = 512   # compression rate: 2048/M
 
 #dataset_type = "Indoor"
 dataset_type = "Outdoor"
@@ -31,13 +32,13 @@ dataset_type = "Outdoor"
 
 
 if dataset_type == "Indoor":
-    test_data = loadmat('DATA_Htestin.mat')
+    test_data = loadmat('../../data/DATA_Htestin.mat')
     H_test = test_data.get('HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
     # first 1024 columns (32X32): real part and the rest 1024 columns: imaginary part
 
 
-    train_data = loadmat('DATA_Htrainin.mat')
+    train_data = loadmat('../../data/DATA_Htrainin.mat')
     H_train = train_data.get('HT')            # (100000, 2048) --> 100000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
 
     H_train = H_train.astype('float32')
@@ -61,13 +62,13 @@ if dataset_type == "Indoor":
 
 
 if dataset_type == "Outdoor":
-    test_data = loadmat('DATA_Htestout.mat')
+    test_data = loadmat('../../data/DATA_Htestout.mat')
     H_test = test_data.get(
         'HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
     # first 1024 columns (32X32): real part and the rest 1024 columns: imaginary part
  
-    train_data = loadmat('DATA_Htrainout.mat')
+    train_data = loadmat('../../data/DATA_Htrainout.mat')
     H_train = train_data.get(
         'HT')  # (100000, 2048) --> 100000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
 
@@ -86,13 +87,6 @@ if dataset_type == "Outdoor":
 
 
 
-latent_dim = 512
-b = 10
-C = 2**b
-m = 4
-beta = 0.25
-
-
 class Vector_Quantizer(nn.Module):
     def __init__(self, num_embeddings, embedding_dim, commitment_cost):
         super().__init__()
@@ -103,10 +97,11 @@ class Vector_Quantizer(nn.Module):
 
         self._embedding = nn.Embedding(self._num_embeddings, self._embedding_dim)    # look up table (Codebook)
         self._embedding.weight.data.uniform_(-1/self._num_embeddings, 1/self._num_embeddings)   # initialize
+        #self._embedding.weight.data.uniform_(0,1)
         self._commitment_cost = commitment_cost
 
 
-    def forward(self, inputs, fine_tuning, n):
+    def forward(self, inputs):
 
         input_shape = inputs.shape
         #print("INPUT SHAPE = ", input_shape)
@@ -114,8 +109,8 @@ class Vector_Quantizer(nn.Module):
         flat_input = inputs.view(-1, self._embedding_dim)
 
 
-        #print("FLAT INPUT : ", flat_input.shape)
-        #print("EMBED WEIGHT : ", self._embedding.weight.shape)
+        # print("FLAT INPUT : ", flat_input.shape)
+        # print("EMBED WEIGHT : ", self._embedding.weight.shape)
 
         # Calculate distances
         term1 = torch.sum(flat_input ** 2, dim=1, keepdim=True)
@@ -146,23 +141,7 @@ class Vector_Quantizer(nn.Module):
         # print(encodings)
 
         # Quantize and unflatten
-        #quantized = torch.matmul(encodings, self._embedding.weight).view(input_shape)
-
-        quantized = torch.matmul(encodings, self._embedding.weight)
-
-        quantized = quantized.view(input_shape)
-
-        # print("QUANTIZED SHAPE", quantized.shape)
-        # print("QUANTIZED: ", quantized)
-
-        if fine_tuning == True:
-            K = input_shape[1]
-            for i in range(len(n)):
-                quantized[i, n[i]:K, :] = 0  # mask with zeros the last (K-n) embeding vectors (wi) (n is the same for the specific sample)
-
-        # print("n = ", n)
-        # print("QUANTIZED SHAPE2", quantized.shape)
-        # print("QUANTIZED2: ", quantized)
+        quantized = torch.matmul(encodings, self._embedding.weight).view(input_shape)
 
         # Loss
         e_latent_loss = F.mse_loss(quantized.detach(), inputs)
@@ -173,7 +152,7 @@ class Vector_Quantizer(nn.Module):
         # avg_probs = torch.mean(encodings, dim=0)
         # perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
 
-        #quantized = quantized.view(len(quantized), -1)
+        quantized = quantized.view(len(quantized), -1)
 
 
         return loss, quantized, encodings
@@ -181,124 +160,158 @@ class Vector_Quantizer(nn.Module):
 
 
 
-class VQ_CsiNet(nn.Module):
-    def __init__(self, latent_dim, embedding_dim, num_embeddings, commitment_cost):
-        super().__init__()
 
+
+class ConvBN(nn.Sequential):
+    def __init__(self, in_planes, out_planes, kernel_size, stride=1, groups=1):
+        if not isinstance(kernel_size, int):
+            padding = [(i - 1) // 2 for i in kernel_size]
+        else:
+            padding = (kernel_size - 1) // 2
+        super(ConvBN, self).__init__(OrderedDict([
+            ('conv', nn.Conv2d(in_planes, out_planes, kernel_size, stride,
+                               padding=padding, groups=groups, bias=False)),
+            ('bn', nn.BatchNorm2d(out_planes))
+        ]))
+
+
+class CRBlock(nn.Module):
+    def __init__(self):
+        super(CRBlock, self).__init__()
+        self.path1 = nn.Sequential(OrderedDict([
+            ('conv3x3', ConvBN(2, 7, 3)),
+            ('relu1', nn.LeakyReLU(negative_slope=0.3, inplace=True)),
+            ('conv1x9', ConvBN(7, 7, [1, 9])),
+            ('relu2', nn.LeakyReLU(negative_slope=0.3, inplace=True)),
+            ('conv9x1', ConvBN(7, 7, [9, 1])),
+        ]))
+        self.path2 = nn.Sequential(OrderedDict([
+            ('conv1x5', ConvBN(2, 7, [1, 5])),
+            ('relu', nn.LeakyReLU(negative_slope=0.3, inplace=True)),
+            ('conv5x1', ConvBN(7, 7, [5, 1])),
+        ]))
+        self.conv1x1 = ConvBN(7 * 2, 2, 1)
+        self.identity = nn.Identity()
+        self.relu = nn.LeakyReLU(negative_slope=0.3, inplace=True)
+
+    def forward(self, x):
+        identity = self.identity(x)
+
+        out1 = self.path1(x)
+        out2 = self.path2(x)
+        out = torch.cat((out1, out2), dim=1)
+        out = self.relu(out)
+        out = self.conv1x1(out)
+
+        out = self.relu(out + identity)
+        return out
+
+
+class CRNet(nn.Module):
+    def __init__(self, num_embeddings, commitment_cost, reduction=4, latent_dim=512, embedding_dim=4):
+        super(CRNet, self).__init__()
+        total_size, in_channel, w, h = 2048, 2, 32, 32
+
+        self.latent_dim = latent_dim
         self.embedding_dim = embedding_dim  # dimension of quantized (embedding) vectors (m)
         self.num_embeddings = num_embeddings  # number of total quantized vectors (C)
         self.commitment_cost = commitment_cost  # beta
-        self.latent_dim = latent_dim
 
-        self._vq_csinet = Vector_Quantizer(num_embeddings, embedding_dim, commitment_cost)
+        self._vq = Vector_Quantizer(num_embeddings, embedding_dim, commitment_cost)
 
 
-        #size: batch_size, 2, 32, 32 -->  (batch_size, output channels, image size)
-        self.encoder1 = nn.Sequential(
+        self.encoder1 = nn.Sequential(OrderedDict([
+            ("conv3x3_bn", ConvBN(in_channel, 2, 3)),
+            ("relu1", nn.LeakyReLU(negative_slope=0.3, inplace=True)),
+            ("conv1x9_bn", ConvBN(2, 2, [1, 9])),
+            ("relu2", nn.LeakyReLU(negative_slope=0.3, inplace=True)),
+            ("conv9x1_bn", ConvBN(2, 2, [9, 1])),
+        ]))
+        self.encoder2 = ConvBN(in_channel, 2, 3)
+        self.encoder_conv = nn.Sequential(OrderedDict([
+            ("relu1", nn.LeakyReLU(negative_slope=0.3, inplace=True)),
+            ("conv1x1_bn", ConvBN(4, 2, 1)),
+            ("relu2", nn.LeakyReLU(negative_slope=0.3, inplace=True)),
+        ]))
+        self.encoder_fc = nn.Linear(total_size, total_size // reduction)
 
-            nn.Conv2d(2, 2, 3, stride=1, padding=1),   #size: batch_size, 2, 32, 32
-            nn.BatchNorm2d(2),
-            nn.LeakyReLU(negative_slope=0.3, inplace=True),
+        self.decoder_fc = nn.Linear(total_size // reduction, total_size)
+        decoder = OrderedDict([
+            ("conv5x5_bn", ConvBN(2, 2, 5)),
+            ("relu", nn.LeakyReLU(negative_slope=0.3, inplace=True)),
+            ("CRBlock1", CRBlock()),
+            ("CRBlock2", CRBlock())
+        ])
+        self.decoder_feature = nn.Sequential(decoder)
+        self.sigmoid = nn.Sigmoid()
 
-        )
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.Linear)):
+                nn.init.xavier_uniform_(m.weight)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
 
-        self.lin = nn.Linear(2048, latent_dim)  # compression ratio = 4
+    def forward(self, x):
+        n, c, h, w = x.detach().size()  # batch_size,2,32,32
 
-        self.lin2 = nn.Linear(latent_dim, 2048)
-
-        # size: batch_size, 2, 32, 32
-        self.refineNet = nn.Sequential(
-            nn.Conv2d(2, 8, 3, stride=1, padding=1),  # size: batch_size, 8, 32, 32
-            nn.BatchNorm2d(8),
-            nn.LeakyReLU(negative_slope=0.3, inplace=True),
-
-            nn.Conv2d(8, 16, 3, stride=1, padding=1),  # size: batch_size, 16, 32, 32
-            nn.BatchNorm2d(16),
-            nn.LeakyReLU(negative_slope=0.3, inplace=True),
-
-            nn.Conv2d(16, 2, 3, stride=1, padding=1),  # size: batch_size, 2, 32, 32
-            nn.BatchNorm2d(2)
-
-        )
-
-        self.finalDecoder = nn.Sequential(
-            nn.Conv2d(2, 2, 3, stride=1, padding=1),  # size: batch_size, 2, 32, 32
-            nn.BatchNorm2d(2),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x, fine_tuning, test_heta=0):
         K = int(self.latent_dim / self.embedding_dim)
 
 
-        # encoder
-        y = self.encoder1(x)
-        y = y.view(len(y), -1)    # reshape: (batch size, 2, 32, 32) --> (batch size, 2048)
-        z = self.lin(y)
+        #encoder
+        encode1 = self.encoder1(x)
+        encode2 = self.encoder2(x)
+        out = torch.cat((encode1, encode2), dim=1)
+        out = self.encoder_conv(out)
+        out = self.encoder_fc(out.view(n, -1))    # shape: batch_size, 512
 
-        #z = z.view(len(z), self.embedding_dim, K)
-        z = z.view(len(z), K, self.embedding_dim)
-
-        n = np.random.randint(1, K + 1, z.shape[0])  # n ~ U(1,K) | z.shape[0] == batch_size
- 
-        if fine_tuning == True:
-            for i in range(len(n)):
-                z[i, n[i]:K, :] = 0    # mask with zeros the last (K-n) vectors (n is the same for the specific sample)
+        z = out.view(len(out), self.embedding_dim, K)
 
 
-        vq_loss, z_q, _ = self._vq_csinet(z, fine_tuning, n)
+        #quantizer
+        vq_loss, z_q, _ = self._vq(z)
+        #z_q = z_q.view(n,-1)
 
-        if test_heta != 0:
-            z_q[:, int(test_heta*K) : K, :] = 0         # test_heta == η --> B = η * K * b = n' * b (n' : number of quantized vectors sent to BS for testing)
 
-        z_q = z_q.view(len(z_q), -1)
+        #decoder
+        out = self.decoder_fc(z_q).view(n, c, h, w)
+        out = self.decoder_feature(out)
 
-        # decoder
-        y = self.lin2(z_q)
-        y = y.view(len(y), 2, 32, 32)
-
-        for i in range(2):
-            # y = self.refineNet(y)
-            # y = y+x
-            z = self.refineNet(y)
-            y = y+z
-            leakyrelu = nn.LeakyReLU(negative_slope=0.3, inplace=True)
-            y = leakyrelu(y)
-
-        decoded = self.finalDecoder(y)
+        decoded = self.sigmoid(out)
 
         return vq_loss, decoded
 
 
+reduction = 4  # from 2*32*32 = 2048 --> 512 (latent space)
+latent_dimension = 512
+embedding_dimension = 4
+beta = 0.25
+b = 10
+C = 2**b
 
 
-#model = VQ_AE(latent_dim, m, C, beta)
-model = VQ_CsiNet(latent_dim, m, C, beta)
+
+model = CRNet(C, beta, reduction=reduction, latent_dim=latent_dimension, embedding_dim=embedding_dimension)
 
 criterion = nn.MSELoss()
 
-#optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)  # for COST2100
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+#optimizer = torch.optim.Adam(model.parameters(), lr=5*1e-3, weight_decay=1e-4)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)   # lr=1e-2
 
-#scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5, verbose=False)
+#scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size= 100, gamma=0.9)   # every 100 epochs decrease the lr by multplying it with 0.9
+
+losses = []
 
 #training
 print("TRAIN")
-epochs_pre_train = 200
-epochs_fine_tune = 100
+epochs = 200
 outputs = []
-losses_pre_train = []
 
-print("==================================================================================================================================")
-print("PRE-TRAINING")
-
-fine_tuning = False
-
-for epoch in range(epochs_pre_train):
+for epoch in range(epochs):
     for h_batch in data_loader:
-        vq_loss, reconstructed_h = model(h_batch, fine_tuning)
+        vq_loss, reconstructed_h = model(h_batch)
 
-        rec_loss = criterion(reconstructed_h, h_batch)   # Is this the loss of first term of formula (3)?
+        rec_loss = criterion(reconstructed_h, h_batch)
 
         print("rec loss = ", rec_loss.item())
 
@@ -316,93 +329,31 @@ for epoch in range(epochs_pre_train):
     print(f'Epoch: {epoch+1}, Loss: {loss.item():.4f}')
     #print(f'Epoch: {epoch + 1}, NMSE: {10*np.log10(loss.item()/norm(h_batch)**2):.4f} dB')
     outputs.append((epoch, h_batch, reconstructed_h))
-    losses_pre_train.append(rec_loss.item())
+    losses.append(rec_loss.item())
     print(outputs[-1])
-
-
-
-print("==================================================================================================================================")
-print("FINE-TUNING")
-print("==================================================================================================================================")
-
-fine_tuning = True
-
-losses_fine_tune = []
-
-for epoch in range(epochs_fine_tune):
-    for h_batch in data_loader:
-
-        vq_loss, reconstructed_h = model(h_batch, fine_tuning)
-
-        rec_loss = criterion(reconstructed_h, h_batch)   # Is this the loss of first term of formula (3)?
-
-        print("rec loss = ", rec_loss.item())
-
-        loss = rec_loss + vq_loss
-
-        print("total loss = ", loss.item())
-
-        optimizer.zero_grad()
-        #scheduler.optimizer.zero_grad()
-        loss.backward()
-        #nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)  # Gradient clipping
-        optimizer.step()
-        #scheduler.step(loss)
-
-    print(f'Epoch: {epoch+1}, Loss: {loss.item():.4f}')
-    #print(f'Epoch: {epoch + 1}, NMSE: {10*np.log10(loss.item()/norm(h_batch)**2):.4f} dB')
-    outputs.append((epoch, h_batch, reconstructed_h))
-    losses_fine_tune.append(rec_loss.item())
-    print(outputs[-1])
-
-fine_tuning = False
 
 
 # ====================================================================================================================================
 # PLOT TRAINING CONVERGENCE
-
-# PRE_TRAIN
-iterations_pre_train = range(1, len(losses_pre_train) + 1)
-plt.plot(iterations_pre_train, losses_pre_train)
-plt.title('Pre-Train Reconstruction Loss')
+iterations = range(1, len(losses) + 1)
+plt.plot(iterations, losses)
+plt.title('Reconstruction Loss')
 plt.xlabel('Epoch')
 plt.ylabel('Loss')
 
 # SAVE THE PLOT
-plot_path = "OVQ_Scheme_New_pre_train_rec_loss.png"
+plot_path = "../../outputs/plots/VQ_CRNet_rec_loss.png"
 plt.savefig(plot_path)
 print(f"Plot saved to {plot_path}")
 
 # Save the losses to a text file
-losses_file_path = "OVQ_Scheme_New_pre_train_rec_loss.txt"
+losses_file_path = "../../outputs/logs/VQ_CRNet_rec_losses.txt"
 with open(losses_file_path, 'w') as f:
-    for loss in losses_pre_train:
+    for loss in losses:
         f.write(f"{loss}\n")
-print(f"Pre train losses saved to {losses_file_path}")
-
-
-# FINE-TUNING
-iterations_fine_tune = range(1, len(losses_fine_tune) + 1)
-plt.clf()
-plt.plot(iterations_fine_tune, losses_fine_tune)
-plt.title('Fine_Tuning Reconstruction Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-
-# SAVE THE PLOT
-plot_path = "OVQ_Scheme_New_fine_tune_rec_loss.png"
-plt.savefig(plot_path)
-print(f"Plot saved to {plot_path}")
-
-# Save the losses to a text file
-losses_file_path = "OVQ_Scheme_New_fine_tune_rec_loss.txt"
-with open(losses_file_path, 'w') as f:
-    for loss in losses_fine_tune:
-        f.write(f"{loss}\n")
-print(f"Pre train losses saved to {losses_file_path}")
+print(f"Losses saved to {losses_file_path}")
 
 # ====================================================================================================================================
-
 
 
 end = time.time()
@@ -413,14 +364,14 @@ print("\nTraining time elapsed = ", end-start, " sec")
 # ====================================================================================================================================
 #SAVE MODEL
 
-model_path = "OVQ_Scheme_New_path.pth"
+model_path = "../../outputs/models/VQ_CRNet_path.pth"
 torch.save(model.state_dict(), model_path)
 print(f"Model saved to {model_path}")
 
 # ====================================================================================================================================
 
 
-
+#Count model's parameters
 model_total_params = sum(p.numel() for p in model.parameters())
 model_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Model's total parameters = ", model_total_params)
@@ -428,16 +379,15 @@ print("Model's trainable parameters = ", model_trainable_params)
 
 
 
+# ===============================================================================================================================================
 # test (X test samples)
-print("TEST (X TEST SAMPLES)")
-
-num_test_samples = 5000
+num_test_samples = 10000
+print(f"TEST ({num_test_samples} TEST SAMPLES)")
 
 H_test = np.reshape(H_test[0:num_test_samples], (num_test_samples, 2, 32, 32))
 
-test_heta = 1
-
-vq_loss_test, H_hat = model(H_test, False, test_heta)
+with torch.no_grad():
+    vq_loss_test, H_hat = model(H_test)
 
 H_test_real = np.reshape(H_test[:, 0, :, :], (len(H_test), -1))
 H_test_imag = np.reshape(H_test[:, 1, :, :], (len(H_test), -1))
@@ -453,17 +403,11 @@ H_test_C = H_test_C.numpy()
 H_hat_C = H_hat_C.numpy()
 
 
-power = np.linalg.norm(H_test_C) ** 2
-print("power = ", power)
-
-# MSE = np.sum(abs(H_test_C-H_hat_C)**2, axis=1)
 MSE = np.linalg.norm(H_test_C - H_hat_C) ** 2
 
-print("MSE = ", MSE)
-#print(MSE.shape)
+power = np.linalg.norm(H_test_C) ** 2
 
 NMSE = 10 * math.log10(np.mean(MSE / power))
-print("OVQ_Scheme_New")
 print("NMSE = ", NMSE, "dB")
 
 

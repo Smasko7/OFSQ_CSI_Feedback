@@ -11,9 +11,8 @@ from numpy.linalg import norm
 from scipy.io import loadmat
 import pandas as pd
 import math
-from vector_quantize_pytorch import LFQ
-from vector_quantize_pytorch import FSQ
 import matplotlib.pyplot as plt
+
 
 
 start = time.time()
@@ -31,13 +30,13 @@ dataset_type = "Indoor"
 
 
 if dataset_type == "Indoor":
-    test_data = loadmat('DATA_Htestin.mat')
+    test_data = loadmat('../../data/DATA_Htestin.mat')
     H_test = test_data.get('HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
     # first 1024 columns (32X32): real part and the rest 1024 columns: imaginary part
 
 
-    train_data = loadmat('DATA_Htrainin.mat')
+    train_data = loadmat('../../data/DATA_Htrainin.mat')
     H_train = train_data.get('HT')            # (100000, 2048) --> 100000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
 
     H_train = H_train.astype('float32')
@@ -61,13 +60,13 @@ if dataset_type == "Indoor":
 
 
 if dataset_type == "Outdoor":
-    test_data = loadmat('DATA_Htestout.mat')
+    test_data = loadmat('../../data/DATA_Htestout.mat')
     H_test = test_data.get(
         'HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
     # first 1024 columns (32X32): real part and the rest 1024 columns: imaginary part
  
-    train_data = loadmat('DATA_Htrainout.mat')
+    train_data = loadmat('../../data/DATA_Htrainout.mat')
     H_train = train_data.get(
         'HT')  # (100000, 2048) --> 100000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
 
@@ -177,8 +176,6 @@ class VQ_AE(nn.Module):
         self.latent_dim = latent_dim
 
         self._vq_vae = Vector_Quantizer(num_embeddings, embedding_dim, commitment_cost)
-        self.FSQ_Quantizer = FSQ([8,5,5,5])    # d = 4, L1 = 8, L2 = L3 = L4 = 5 --> 8*5*5*5 = 1000 ~= 1024=2^10 --> codebook size
-
 
         #size: batch_size, 2, 32, 32 -->  (batch_size, output channels, image size)
         self.encoder = nn.Sequential(
@@ -224,19 +221,16 @@ class VQ_AE(nn.Module):
         out = out.view(len(out), -1)
         z = self.lin1(out)
 
-        z = z.view(len(z), K, self.embedding_dim)
+        z = z.view(len(z), self.embedding_dim, K)
 
-        #vq_loss, z_q,  _ = self._vq_vae(z)
-        z_q, indices = self.FSQ_Quantizer(z)
-
-        z_q = z_q.view(len(z_q), -1)
+        vq_loss, z_q,  _ = self._vq_vae(z)
 
 
         #decode
         y = self.lin2(z_q)
         y = y.view(len(out), 16, 8, 8)
         decoded = self.decoder(y)
-        return decoded, indices
+        return vq_loss, decoded
 
 
 
@@ -253,8 +247,7 @@ class VQ_CsiNet(nn.Module):
         self.commitment_cost = commitment_cost  # beta
         self.latent_dim = latent_dim
 
-        #self._vq_vae = Vector_Quantizer(num_embeddings, embedding_dim, commitment_cost)
-        self.FSQ_Quantizer = FSQ([8,5,5,5])    # d = 4, L1 = 8, L2 = L3 = L4 = 5 --> 8*5*5*5 = 1000 ~= 1024=2^10 --> codebook size
+        self._vq_vae = Vector_Quantizer(num_embeddings, embedding_dim, commitment_cost)
 
 
         #size: batch_size, 2, 32, 32 -->  (batch_size, output channels, image size)
@@ -300,32 +293,12 @@ class VQ_CsiNet(nn.Module):
         y = y.view(len(y), -1)    # reshape: (100000, 2, 32, 32) --> (100000, 2048)
         z = self.lin(y)
 
-        z = z.view(len(z), K, self.embedding_dim)
+        z = z.view(len(z), self.embedding_dim, K)
 
-        # vq_loss, z_q,  _ = self._vq_vae(z)
-        z_q, indices = self.FSQ_Quantizer(z)
-
-        z_q = z_q.view(len(z_q), -1)
-
-        # print("Z_Q : ", z_q)
-        # print(z_q.shape)
-
+        vq_loss, z_q, _ = self._vq_vae(z)
 
         # decoder
-
-        # # ========================================================================================================
-        # # Dokimazw na kanw to inverse FSQ prin steilw ta features sto linear layer tou decoder
-        #
-        # with torch.no_grad():
-        #     for i in range(0,128):
-        #         z_q[:, 4*i:4*(i+1)] = z_q[:, 4*i:4*(i+1)] * torch.from_numpy(np.array([1/math.floor(8/2), 1/math.floor(5/2), 1/math.floor(5/2), 1/math.floor(5/2)]))
-        #
-        #     z_q = torch.atanh(z_q)
-        #
-        # # ========================================================================================================
-
         y = self.lin2(z_q)
-
         y = y.view(len(y), 2, 32, 32)
 
         for i in range(2):
@@ -338,12 +311,11 @@ class VQ_CsiNet(nn.Module):
 
         decoded = self.finalDecoder(y)
 
-        return decoded, indices
+        return vq_loss, decoded
 
 
 
 
-#model = VQ_AE(latent_dim, m, C, beta)
 model = VQ_CsiNet(latent_dim, m, C, beta)
 
 criterion = nn.MSELoss()
@@ -353,22 +325,24 @@ optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
 #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5, verbose=False)
 
-losses = []
-
 #training
 print("TRAIN")
 epochs = 200
 outputs = []
 
+losses = []
+
 for epoch in range(epochs):
     for h_batch in data_loader:
-        reconstructed_h, indices = model(h_batch)
+        vq_loss, reconstructed_h = model(h_batch)
 
         rec_loss = criterion(reconstructed_h, h_batch)   # Is this the loss of first term of formula (3)?
 
         print("rec loss = ", rec_loss.item())
 
-        loss = rec_loss
+        loss = rec_loss + vq_loss
+
+        print("total loss = ", loss.item())
 
         optimizer.zero_grad()
         #scheduler.optimizer.zero_grad()
@@ -380,7 +354,7 @@ for epoch in range(epochs):
     print(f'Epoch: {epoch+1}, Loss: {loss.item():.4f}')
     #print(f'Epoch: {epoch + 1}, NMSE: {10*np.log10(loss.item()/norm(h_batch)**2):.4f} dB')
     outputs.append((epoch, h_batch, reconstructed_h))
-    losses.append(loss.item())
+    losses.append(rec_loss.item())
     print(outputs[-1])
 
 
@@ -393,12 +367,12 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 
 # SAVE THE PLOT
-plot_path = "FSQ_AE_rec_loss.png"
+plot_path = "../../outputs/plots/VQ_CsiNet_rec_loss.png"
 plt.savefig(plot_path)
 print(f"Plot saved to {plot_path}")
 
 # Save the losses to a text file
-losses_file_path = "FSQ_AE_rec_losses.txt"
+losses_file_path = "../../outputs/logs/VQ_CsiNet_rec_losses.txt"
 with open(losses_file_path, 'w') as f:
     for loss in losses:
         f.write(f"{loss}\n")
@@ -407,19 +381,22 @@ print(f"Losses saved to {losses_file_path}")
 # ====================================================================================================================================
 
 
+
 end = time.time()
 
 print("\nTraining time elapsed = ", end-start, " sec")
 
 
+
 # ====================================================================================================================================
 #SAVE MODEL
 
-model_path = "FSQ_AE_path.pth"
+model_path = "../../outputs/models/VQ_CsiNet_path.pth"
 torch.save(model.state_dict(), model_path)
 print(f"Model saved to {model_path}")
 
 # ====================================================================================================================================
+
 
 
 model_total_params = sum(p.numel() for p in model.parameters())
@@ -430,31 +407,43 @@ print("Model's trainable parameters = ", model_trainable_params)
 
 
 
-# test (X test samples)
-print("TEST (X TEST SAMPLES)")
+# test (1 test sample)
+print("TEST (ONE TEST SAMPLE)")
 
-num_test_samples = 5000
+H_test = np.reshape(H_test[0], (1, 2, 32, 32))
 
-H_test = np.reshape(H_test[0:num_test_samples], (num_test_samples, 2, 32, 32))
-
-H_hat, test_indices = model(H_test)
+vq_loss_test, H_hat = model(H_test)
 
 H_test_real = np.reshape(H_test[:, 0, :, :], (len(H_test), -1))
 H_test_imag = np.reshape(H_test[:, 1, :, :], (len(H_test), -1))
 H_test_C = H_test_real - 0.5 + 1j * (H_test_imag - 0.5)
 
-#print("H TEST: ", H_test_C.shape)
-
 H_hat = H_hat.detach().numpy()
 H_hat = torch.from_numpy(H_hat.astype(np.float32))
-H_hat_real = np.reshape(H_hat[:, 0, :, :], (len(H_hat), -1))
-H_hat_imag = np.reshape(H_hat[:, 1, :, :], (len(H_hat), -1))
+H_hat_real = np.reshape(H_hat[:, 0, :, :], (1, -1))
+H_hat_imag = np.reshape(H_hat[:, 1, :, :], (1, -1))
 H_hat_C = H_hat_real - 0.5 + 1j * (H_hat_imag - 0.5)
-
-#print("H HAT: ", H_hat_C.shape)
 
 H_test_C = H_test_C.numpy()
 H_hat_C = H_hat_C.numpy()
+
+#print("H TEST C - H HAT C: ", H_test_C - H_hat_C)
+
+MSE2 = (H_hat_real - H_test_real) ** 2 + (H_hat_imag - H_test_imag) ** 2  # Square error
+print(("MSE2 = ", MSE2))
+print(MSE2.shape)
+
+pow2 = H_test_real ** 2 + H_test_imag ** 2
+# print("pow2 = ", pow2)
+# print(pow2.shape)
+
+ss = MSE2 / pow2
+ss = ss.numpy()
+# print(ss)
+# print(ss.shape)
+
+NMSE2 = 10 * math.log10(np.mean(ss))
+print("NMSE2 = ", NMSE2)
 
 # power = np.mean(abs(H_test_C)**2, axis=1)
 power = np.linalg.norm(H_test_C) ** 2
@@ -468,6 +457,84 @@ print("MSE = ", MSE)
 
 NMSE = 10 * math.log10(np.mean(MSE / power))
 print("NMSE = ", NMSE, "dB")
+
+
+
+
+
+
+# #test
+# print("TEST")
+#
+# vq_loss_test, H_hat = model(H_test)
+#
+#
+# H_test_real = np.reshape(H_test[:, 0, :, :], (len(H_test), -1))
+# H_test_imag = np.reshape(H_test[:, 1, :, :], (len(H_test), -1))
+# H_test_C = H_test_real-0.5 + 1j*(H_test_imag-0.5)
+#
+# H_hat = H_hat.detach().numpy()
+# H_hat = torch.from_numpy(H_hat.astype(np.float32))
+# H_hat_real = np.reshape(H_hat[:, 0, :, :], (len(H_hat), -1))
+# H_hat_imag = np.reshape(H_hat[:, 1, :, :], (len(H_hat), -1))
+# H_hat_C = H_hat_real-0.5 + 1j*(H_hat_imag-0.5)
+#
+# H_test_C = H_test_C.numpy()
+# H_hat_C = H_hat_C.numpy()
+#
+# # print("H TEST C - H HAT C: ", H_test_C - H_hat_C)
+#
+#
+# # MSE2 = (H_hat_real - H_test_real)**2 + (H_hat_imag - H_test_imag)**2  # Square error
+# # print(("MSE2 = ", MSE2))
+# # print(MSE2.shape)
+# #
+# # pow2 = H_test_real**2 + H_test_imag**2
+# # print("pow2 = ", pow2)
+# # print(pow2.shape)
+# #
+# # ss = MSE2/pow2
+# # ss = ss.numpy()
+# # print(ss)
+# # print(ss.shape)
+# #
+# # NMSE2 = 10*math.log10(np.mean(ss))
+# # print("NMSE2 = ", NMSE2)
+#
+#
+#
+# #power4 = np.sum(abs(H_test_C)**2, axis=1)
+# power = np.linalg.norm(H_test_C, axis=1)**2
+# print("power = ", power)
+# #print("power4 = ", power4)
+#
+# #MSE4 = np.sum(abs(H_test_C-H_hat_C)**2, axis=1)
+# MSE = np.linalg.norm(H_test_C-H_hat_C, axis=1)**2
+#
+# print("MSE = ", MSE)
+# #print(MSE.shape)
+# #print("MSE4 = ", MSE4)
+#
+# NMSE = 10*math.log10(np.mean(MSE/power))
+# print("NMSE = ", NMSE)
+#
+# #NMSE4 = 10*math.log10(np.mean(MSE4/power4))
+# #print("NMSE4 = ", NMSE4)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

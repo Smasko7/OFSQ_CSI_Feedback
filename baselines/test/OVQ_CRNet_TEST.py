@@ -15,6 +15,7 @@ import math
 import matplotlib.pyplot as plt
 
 
+
 start = time.time()
 
 
@@ -23,37 +24,29 @@ Nc = 32  # subcarriers (after DFT)
 img_channels = 2
 M = 512   # compression rate: 2048/M
 
-#dataset_type = "Indoor"
-dataset_type = "Outdoor"
+dataset_type = "Indoor"
+#dataset_type = "Outdoor"
 
 # =====================================================================================================================================================================================
 # Data from COST2100
 
 
 if dataset_type == "Indoor":
-    test_data = loadmat('DATA_Htestin.mat')
+    test_data = loadmat('../../data/DATA_Htestin.mat')
     H_test = test_data.get('HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
     # first 1024 columns (32X32): real part and the rest 1024 columns: imaginary part
 
 
-    train_data = loadmat('DATA_Htrainin.mat')
-    H_train = train_data.get('HT')            # (100000, 2048) --> 100000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
-
-    H_train = H_train.astype('float32')
     H_test = H_test.astype('float32')
 
-    H_train = np.reshape(H_train, (len(H_train), img_channels, Nt, Nc))   # from (100000, 2048) --> (100000, 2, 32, 32)
     H_test = np.reshape(H_test, (len(H_test), img_channels, Nt, Nc))   # from (20000, 2048) --> (20000, 2, 32, 32)
 
-
-    H_train = torch.from_numpy(H_train.astype(np.float32))
     H_test = torch.from_numpy(H_test.astype(np.float32))
 
 
     batch_size = 200  # number of samples per pass in training
 
-    data_loader = torch.utils.data.DataLoader(dataset= H_train, batch_size=batch_size, shuffle=True)
 
 
 
@@ -61,28 +54,19 @@ if dataset_type == "Indoor":
 
 
 if dataset_type == "Outdoor":
-    test_data = loadmat('DATA_Htestout.mat')
+    test_data = loadmat('../../data/DATA_Htestout.mat')
     H_test = test_data.get(
         'HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
     # first 1024 columns (32X32): real part and the rest 1024 columns: imaginary part
- 
-    train_data = loadmat('DATA_Htrainout.mat')
-    H_train = train_data.get(
-        'HT')  # (100000, 2048) --> 100000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
-
-    H_train = H_train.astype('float32')
+    
     H_test = H_test.astype('float32')
 
-    H_train = np.reshape(H_train, (len(H_train), img_channels, Nt, Nc))  # from (100000, 2048) --> (100000, 2, 32, 32)
     H_test = np.reshape(H_test, (len(H_test), img_channels, Nt, Nc))  # from (20000, 2048) --> (20000, 2, 32, 32)
 
-    H_train = torch.from_numpy(H_train.astype(np.float32))
     H_test = torch.from_numpy(H_test.astype(np.float32))
 
     batch_size = 200  # number of samples per pass in training
-
-    data_loader = torch.utils.data.DataLoader(dataset=H_train, batch_size=batch_size, shuffle=True)
 
 
 
@@ -159,12 +143,10 @@ class Vector_Quantizer(nn.Module):
         # avg_probs = torch.mean(encodings, dim=0)
         # perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
 
-        quantized = quantized.view(len(quantized), -1)
+        #quantized = quantized.view(len(quantized), -1)
 
 
         return loss, quantized, encodings
-
-
 
 
 
@@ -260,7 +242,7 @@ class CRNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x, fine_tuning):
+    def forward(self, x, fine_tuning, test_heta=0):
         N, c, h, w = x.detach().size()  # batch_size,2,32,32
 
 
@@ -287,6 +269,11 @@ class CRNet(nn.Module):
         vq_loss, z_q, _ = self._vq(z, fine_tuning, n)
         #z_q = z_q.view(n,-1)
 
+        if test_heta != 0:
+            z_q[:, int(test_heta*K) : K, :] = 0         # test_heta == η --> B = η * K * b = n' * b (n' : number of quantized vectors sent to BS for testing)
+
+        z_q = z_q.view(len(z_q), -1)
+
 
         #decoder
         out = self.decoder_fc(z_q).view(N, c, h, w)
@@ -305,156 +292,18 @@ b = 10
 C = 2**b
 
 
+# ====================================================================================================================================
+# LOAD MODEL
 
 model = CRNet(C, beta, reduction=reduction, latent_dim=latent_dimension, embedding_dim=embedding_dimension)
 
-criterion = nn.MSELoss()
-
-#optimizer = torch.optim.Adam(model.parameters(), lr=5*1e-3, weight_decay=1e-4)
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)   # lr=1e-2
-
-#scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size= 100, gamma=0.9)   # every 100 epochs decrease the lr by multplying it with 0.9
-
-
-#training
-print("TRAIN")
-epochs_pre_train = 200
-epochs_fine_tune = 100
-outputs = []
-losses_pre_train = []
-
-print("==================================================================================================================================")
-print("PRE-TRAINING")
-
-fine_tuning = False
-
-for epoch in range(epochs_pre_train):
-    for h_batch in data_loader:
-        vq_loss, reconstructed_h = model(h_batch, fine_tuning)
-
-        rec_loss = criterion(reconstructed_h, h_batch)
-
-        print("rec loss = ", rec_loss.item())
-
-        loss = rec_loss + vq_loss
-
-        print("total loss = ", loss.item())
-
-        optimizer.zero_grad()
-        #scheduler.optimizer.zero_grad()
-        loss.backward()
-        #nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)  # Gradient clipping
-        optimizer.step()
-        #scheduler.step(loss)
-
-    print(f'Epoch: {epoch+1}, Loss: {loss.item():.4f}')
-    #print(f'Epoch: {epoch + 1}, NMSE: {10*np.log10(loss.item()/norm(h_batch)**2):.4f} dB')
-    outputs.append((epoch, h_batch, reconstructed_h))
-    losses_pre_train.append(rec_loss.item())
-    print(outputs[-1])
-
-
-
-print("==================================================================================================================================")
-print("FINE-TUNING")
-print("==================================================================================================================================")
-
-fine_tuning = True
-
-losses_fine_tune = []
-
-for epoch in range(epochs_fine_tune):
-    for h_batch in data_loader:
-
-        vq_loss, reconstructed_h = model(h_batch, fine_tuning)
-
-        rec_loss = criterion(reconstructed_h, h_batch)   # Is this the loss of first term of formula (3)?
-
-        print("rec loss = ", rec_loss.item())
-
-        loss = rec_loss + vq_loss
-
-        print("total loss = ", loss.item())
-
-        optimizer.zero_grad()
-        #scheduler.optimizer.zero_grad()
-        loss.backward()
-        #nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)  # Gradient clipping
-        optimizer.step()
-        #scheduler.step(loss)
-
-    print(f'Epoch: {epoch+1}, Loss: {loss.item():.4f}')
-    #print(f'Epoch: {epoch + 1}, NMSE: {10*np.log10(loss.item()/norm(h_batch)**2):.4f} dB')
-    outputs.append((epoch, h_batch, reconstructed_h))
-    losses_fine_tune.append(rec_loss.item())
-    print(outputs[-1])
-
-fine_tuning = False
-
-
-
-
-
-# ====================================================================================================================================
-# PLOT TRAINING CONVERGENCE
-
-# PRE_TRAIN
-iterations_pre_train = range(1, len(losses_pre_train) + 1)
-plt.plot(iterations_pre_train, losses_pre_train)
-plt.title('Pre-Train Reconstruction Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-
-# SAVE THE PLOT
-plot_path = "OVQ_CRNet_pre_train_rec_loss.png"
-plt.savefig(plot_path)
-print(f"Plot saved to {plot_path}")
-
-# Save the losses to a text file
-losses_file_path = "OVQ_CRNet_pre_train_rec_loss.txt"
-with open(losses_file_path, 'w') as f:
-    for loss in losses_pre_train:
-        f.write(f"{loss}\n")
-print(f"Pre train losses saved to {losses_file_path}")
-
-
-# FINE-TUNING
-iterations_fine_tune = range(1, len(losses_fine_tune) + 1)
-plt.clf()
-plt.plot(iterations_fine_tune, losses_fine_tune)
-plt.title('Fine_Tuning Reconstruction Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-
-# SAVE THE PLOT
-plot_path = "OVQ_CRNet_fine_tune_rec_loss.png"
-plt.savefig(plot_path)
-print(f"Plot saved to {plot_path}")
-
-# Save the losses to a text file
-losses_file_path = "OVQ_CRNet_fine_tune_rec_loss.txt"
-with open(losses_file_path, 'w') as f:
-    for loss in losses_fine_tune:
-        f.write(f"{loss}\n")
-print(f"Pre train losses saved to {losses_file_path}")
+model_path = "../../outputs/models/OVQ_CRNet_path_OUT.pth"
+model.load_state_dict(torch.load(model_path))
+model.eval()  # Set the model to evaluation mode (ignores batch normalizations etc)
+print(f"Model loaded from {model_path}")
 
 # ====================================================================================================================================
 
-
-
-end = time.time()
-
-print("\nTraining time elapsed = ", end-start, " sec")
-
-
-# ====================================================================================================================================
-#SAVE MODEL
-
-model_path = "OVQ_CRNet_path.pth"
-torch.save(model.state_dict(), model_path)
-print(f"Model saved to {model_path}")
-
-# ====================================================================================================================================
 
 
 #Count model's parameters
@@ -467,13 +316,15 @@ print("Model's trainable parameters = ", model_trainable_params)
 
 # ===============================================================================================================================================
 # test (X test samples)
-num_test_samples = 10000
+num_test_samples = 1000
 print(f"TEST ({num_test_samples} TEST SAMPLES)")
 
 H_test = np.reshape(H_test[0:num_test_samples], (num_test_samples, 2, 32, 32))
 
+
+test_heta = 1
 with torch.no_grad():
-    vq_loss_test, H_hat = model(H_test, False)
+    vq_loss_test, H_hat = model(H_test, False, test_heta)
 
 H_test_real = np.reshape(H_test[:, 0, :, :], (len(H_test), -1))
 H_test_imag = np.reshape(H_test[:, 1, :, :], (len(H_test), -1))

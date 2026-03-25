@@ -1,4 +1,3 @@
-from collections import OrderedDict
 import torch
 import torchvision
 import torchvision.transforms as transforms
@@ -12,8 +11,9 @@ from numpy.linalg import norm
 from scipy.io import loadmat
 import pandas as pd
 import math
+from vector_quantize_pytorch import LFQ
+from vector_quantize_pytorch import FSQ
 import matplotlib.pyplot as plt
-
 
 
 start = time.time()
@@ -22,23 +22,22 @@ start = time.time()
 Nt = 32  # base station antennas
 Nc = 32  # subcarriers (after DFT)
 img_channels = 2
-M = 512   # compression rate: 2048/M
 
-#dataset_type = "Indoor"
-dataset_type = "Outdoor"
+dataset_type = "Indoor"
+#dataset_type = "Outdoor"
 
 # =====================================================================================================================================================================================
 # Data from COST2100
 
 
 if dataset_type == "Indoor":
-    test_data = loadmat('DATA_Htestin.mat')
+    test_data = loadmat('../../data/DATA_Htestin.mat')
     H_test = test_data.get('HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
     # first 1024 columns (32X32): real part and the rest 1024 columns: imaginary part
 
 
-    train_data = loadmat('DATA_Htrainin.mat')
+    train_data = loadmat('../../data/DATA_Htrainin.mat')
     H_train = train_data.get('HT')            # (100000, 2048) --> 100000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
 
     H_train = H_train.astype('float32')
@@ -62,13 +61,13 @@ if dataset_type == "Indoor":
 
 
 if dataset_type == "Outdoor":
-    test_data = loadmat('DATA_Htestout.mat')
+    test_data = loadmat('../../data/DATA_Htestout.mat')
     H_test = test_data.get(
         'HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
     # first 1024 columns (32X32): real part and the rest 1024 columns: imaginary part
  
-    train_data = loadmat('DATA_Htrainout.mat')
+    train_data = loadmat('../../data/DATA_Htrainout.mat')
     H_train = train_data.get(
         'HT')  # (100000, 2048) --> 100000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
 
@@ -85,6 +84,13 @@ if dataset_type == "Outdoor":
 
     data_loader = torch.utils.data.DataLoader(dataset=H_train, batch_size=batch_size, shuffle=True)
 
+
+
+latent_dim = 512
+b = 10
+C = 2**b
+m = 4
+beta = 0.25
 
 
 class Vector_Quantizer(nn.Module):
@@ -161,144 +167,191 @@ class Vector_Quantizer(nn.Module):
 
 
 
+class VQ_AE(nn.Module):
+    def __init__(self, latent_dim, embedding_dim, num_embeddings, commitment_cost):
+        super().__init__()
 
-class ConvBN(nn.Sequential):
-    def __init__(self, in_planes, out_planes, kernel_size, stride=1, groups=1):
-        if not isinstance(kernel_size, int):
-            padding = [(i - 1) // 2 for i in kernel_size]
-        else:
-            padding = (kernel_size - 1) // 2
-        super(ConvBN, self).__init__(OrderedDict([
-            ('conv', nn.Conv2d(in_planes, out_planes, kernel_size, stride,
-                               padding=padding, groups=groups, bias=False)),
-            ('bn', nn.BatchNorm2d(out_planes))
-        ]))
+        self.embedding_dim = embedding_dim      # dimension of quantized (embedding) vectors (m)
+        self.num_embeddings = num_embeddings    # number of total quantized vectors (C)
+        self.commitment_cost = commitment_cost  # beta
+        self.latent_dim = latent_dim
+
+        self._vq_vae = Vector_Quantizer(num_embeddings, embedding_dim, commitment_cost)
+        self.FSQ_Quantizer = FSQ([8,5,5,5])    # d = 4, L1 = 8, L2 = L3 = L4 = 5 --> 8*5*5*5 = 1000 ~= 1024=2^10 --> codebook size
 
 
-class CRBlock(nn.Module):
-    def __init__(self):
-        super(CRBlock, self).__init__()
-        self.path1 = nn.Sequential(OrderedDict([
-            ('conv3x3', ConvBN(2, 7, 3)),
-            ('relu1', nn.LeakyReLU(negative_slope=0.3, inplace=True)),
-            ('conv1x9', ConvBN(7, 7, [1, 9])),
-            ('relu2', nn.LeakyReLU(negative_slope=0.3, inplace=True)),
-            ('conv9x1', ConvBN(7, 7, [9, 1])),
-        ]))
-        self.path2 = nn.Sequential(OrderedDict([
-            ('conv1x5', ConvBN(2, 7, [1, 5])),
-            ('relu', nn.LeakyReLU(negative_slope=0.3, inplace=True)),
-            ('conv5x1', ConvBN(7, 7, [5, 1])),
-        ]))
-        self.conv1x1 = ConvBN(7 * 2, 2, 1)
-        self.identity = nn.Identity()
-        self.relu = nn.LeakyReLU(negative_slope=0.3, inplace=True)
+        #size: batch_size, 2, 32, 32 -->  (batch_size, output channels, image size)
+        self.encoder = nn.Sequential(
+            nn.Conv2d(2, 8, 3, stride=2, padding=1),   #size: batch_size, 8, 16, 16
+            nn.BatchNorm2d(8),
+            nn.ReLU(),
+            # nn.Conv2d(8, 8, 3, stride=1, padding=1),  # size: batch_size, 8, 16, 16
+            # nn.ReLU(),
+            nn.Conv2d(8, 16, 3, stride=2, padding=1),  #size: batch_size, 16, 8, 8
+
+        )
+
+        self.lin1 = nn.Sequential(
+            nn.Linear(1024, latent_dim),
+            nn.BatchNorm1d(latent_dim),
+            #nn.ReLU(),
+        )
+
+        self.lin2 = nn.Sequential(
+            nn.Linear(latent_dim, 1024),
+            nn.BatchNorm1d(1024),
+            #nn.ReLU(),
+        )
+
+        # size: batch_size, 16, 8, 8
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(16, 8, 3, stride=2, padding=1, output_padding=1),  # size: batch_size, 8, 16, 16
+            nn.BatchNorm2d(8),
+            nn.ReLU(),
+            # nn.Conv2d(8, 8, 3, stride=1, padding=1),  # size: batch_size, 8, 16, 16
+            # nn.ReLU(),
+            nn.ConvTranspose2d(8, 2, 3, stride=2, padding=1, output_padding=1),  # size: batch_size, 2, 32, 32
+            nn.Sigmoid() # because original data values are between 0 and 1
+
+        )
+
 
     def forward(self, x):
-        identity = self.identity(x)
+        K = int(self.latent_dim / self.embedding_dim)
 
-        out1 = self.path1(x)
-        out2 = self.path2(x)
-        out = torch.cat((out1, out2), dim=1)
-        out = self.relu(out)
-        out = self.conv1x1(out)
+        #encode
+        out = self.encoder(x)
+        out = out.view(len(out), -1)
+        z = self.lin1(out)
 
-        out = self.relu(out + identity)
-        return out
+        z = z.view(len(z), K, self.embedding_dim)
+
+        #vq_loss, z_q,  _ = self._vq_vae(z)
+        z_q, indices = self.FSQ_Quantizer(z)
+
+        z_q = z_q.view(len(z_q), -1)
 
 
-class CRNet(nn.Module):
-    def __init__(self, num_embeddings, commitment_cost, reduction=4, latent_dim=512, embedding_dim=4):
-        super(CRNet, self).__init__()
-        total_size, in_channel, w, h = 2048, 2, 32, 32
+        #decode
+        y = self.lin2(z_q)
+        y = y.view(len(out), 16, 8, 8)
+        decoded = self.decoder(y)
+        return decoded, indices
 
-        self.latent_dim = latent_dim
+
+
+
+
+
+
+class VQ_CsiNet(nn.Module):
+    def __init__(self, latent_dim, embedding_dim, num_embeddings, commitment_cost):
+        super().__init__()
+
         self.embedding_dim = embedding_dim  # dimension of quantized (embedding) vectors (m)
         self.num_embeddings = num_embeddings  # number of total quantized vectors (C)
         self.commitment_cost = commitment_cost  # beta
+        self.latent_dim = latent_dim
 
-        self._vq = Vector_Quantizer(num_embeddings, embedding_dim, commitment_cost)
+        #self._vq_vae = Vector_Quantizer(num_embeddings, embedding_dim, commitment_cost)
+        self.FSQ_Quantizer = FSQ([8,5,5,5])    # d = 4, L1 = 8, L2 = L3 = L4 = 5 --> 8*5*5*5 = 1000 ~= 1024=2^10 --> codebook size
 
 
-        self.encoder1 = nn.Sequential(OrderedDict([
-            ("conv3x3_bn", ConvBN(in_channel, 2, 3)),
-            ("relu1", nn.LeakyReLU(negative_slope=0.3, inplace=True)),
-            ("conv1x9_bn", ConvBN(2, 2, [1, 9])),
-            ("relu2", nn.LeakyReLU(negative_slope=0.3, inplace=True)),
-            ("conv9x1_bn", ConvBN(2, 2, [9, 1])),
-        ]))
-        self.encoder2 = ConvBN(in_channel, 2, 3)
-        self.encoder_conv = nn.Sequential(OrderedDict([
-            ("relu1", nn.LeakyReLU(negative_slope=0.3, inplace=True)),
-            ("conv1x1_bn", ConvBN(4, 2, 1)),
-            ("relu2", nn.LeakyReLU(negative_slope=0.3, inplace=True)),
-        ]))
-        self.encoder_fc = nn.Linear(total_size, total_size // reduction)
+        #size: batch_size, 2, 32, 32 -->  (batch_size, output channels, image size)
+        self.encoder1 = nn.Sequential(
 
-        self.decoder_fc = nn.Linear(total_size // reduction, total_size)
-        decoder = OrderedDict([
-            ("conv5x5_bn", ConvBN(2, 2, 5)),
-            ("relu", nn.LeakyReLU(negative_slope=0.3, inplace=True)),
-            ("CRBlock1", CRBlock()),
-            ("CRBlock2", CRBlock())
-        ])
-        self.decoder_feature = nn.Sequential(decoder)
-        self.sigmoid = nn.Sigmoid()
+            nn.Conv2d(2, 2, 3, stride=1, padding=1),   #size: batch_size, 2, 32, 32
+            nn.BatchNorm2d(2),
+            nn.LeakyReLU(negative_slope=0.3, inplace=True),
 
-        for m in self.modules():
-            if isinstance(m, (nn.Conv2d, nn.Linear)):
-                nn.init.xavier_uniform_(m.weight)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+        )
+
+        self.lin = nn.Linear(2048, latent_dim)  # compression ratio = 4
+
+        self.lin2 = nn.Linear(latent_dim, 2048)
+
+        # size: batch_size, 2, 32, 32
+        self.refineNet = nn.Sequential(
+            nn.Conv2d(2, 8, 3, stride=1, padding=1),  # size: batch_size, 8, 32, 32
+            nn.BatchNorm2d(8),
+            nn.LeakyReLU(negative_slope=0.3, inplace=True),
+
+            nn.Conv2d(8, 16, 3, stride=1, padding=1),  # size: batch_size, 16, 32, 32
+            nn.BatchNorm2d(16),
+            nn.LeakyReLU(negative_slope=0.3, inplace=True),
+
+            nn.Conv2d(16, 2, 3, stride=1, padding=1),  # size: batch_size, 2, 32, 32
+            nn.BatchNorm2d(2)
+
+        )
+
+        self.finalDecoder = nn.Sequential(
+            nn.Conv2d(2, 2, 3, stride=1, padding=1),  # size: batch_size, 2, 32, 32
+            nn.BatchNorm2d(2),
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
-        n, c, h, w = x.detach().size()  # batch_size,2,32,32
-
         K = int(self.latent_dim / self.embedding_dim)
 
 
-        #encoder
-        encode1 = self.encoder1(x)
-        encode2 = self.encoder2(x)
-        out = torch.cat((encode1, encode2), dim=1)
-        out = self.encoder_conv(out)
-        out = self.encoder_fc(out.view(n, -1))    # shape: batch_size, 512
+        # encoder
+        y = self.encoder1(x)
+        y = y.view(len(y), -1)    # reshape: (100000, 2, 32, 32) --> (100000, 2048)
+        z = self.lin(y)
 
-        z = out.view(len(out), self.embedding_dim, K)
+        z = z.view(len(z), K, self.embedding_dim)
 
+        # vq_loss, z_q,  _ = self._vq_vae(z)
+        z_q, indices = self.FSQ_Quantizer(z)
 
-        #quantizer
-        vq_loss, z_q, _ = self._vq(z)
-        #z_q = z_q.view(n,-1)
+        z_q = z_q.view(len(z_q), -1)
 
-
-        #decoder
-        out = self.decoder_fc(z_q).view(n, c, h, w)
-        out = self.decoder_feature(out)
-
-        decoded = self.sigmoid(out)
-
-        return vq_loss, decoded
+        # print("Z_Q : ", z_q)
+        # print(z_q.shape)
 
 
-reduction = 4  # from 2*32*32 = 2048 --> 512 (latent space)
-latent_dimension = 512
-embedding_dimension = 4
-beta = 0.25
-b = 10
-C = 2**b
+        # decoder
+
+        # # ========================================================================================================
+        # # Dokimazw na kanw to inverse FSQ prin steilw ta features sto linear layer tou decoder
+        #
+        # with torch.no_grad():
+        #     for i in range(0,128):
+        #         z_q[:, 4*i:4*(i+1)] = z_q[:, 4*i:4*(i+1)] * torch.from_numpy(np.array([1/math.floor(8/2), 1/math.floor(5/2), 1/math.floor(5/2), 1/math.floor(5/2)]))
+        #
+        #     z_q = torch.atanh(z_q)
+        #
+        # # ========================================================================================================
+
+        y = self.lin2(z_q)
+
+        y = y.view(len(y), 2, 32, 32)
+
+        for i in range(2):
+            # y = self.refineNet(y)
+            # y = y+x
+            z = self.refineNet(y)
+            y = y+z
+            leakyrelu = nn.LeakyReLU(negative_slope=0.3, inplace=True)
+            y = leakyrelu(y)
+
+        decoded = self.finalDecoder(y)
+
+        return decoded, indices
 
 
 
-model = CRNet(C, beta, reduction=reduction, latent_dim=latent_dimension, embedding_dim=embedding_dimension)
+
+#model = VQ_AE(latent_dim, m, C, beta)
+model = VQ_CsiNet(latent_dim, m, C, beta)
 
 criterion = nn.MSELoss()
 
-#optimizer = torch.optim.Adam(model.parameters(), lr=5*1e-3, weight_decay=1e-4)
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)   # lr=1e-2
+#optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)  # for COST2100
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-#scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size= 100, gamma=0.9)   # every 100 epochs decrease the lr by multplying it with 0.9
+#scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5, verbose=False)
 
 losses = []
 
@@ -309,15 +362,13 @@ outputs = []
 
 for epoch in range(epochs):
     for h_batch in data_loader:
-        vq_loss, reconstructed_h = model(h_batch)
+        reconstructed_h, indices = model(h_batch)
 
-        rec_loss = criterion(reconstructed_h, h_batch)
+        rec_loss = criterion(reconstructed_h, h_batch)   # Is this the loss of first term of formula (3)?
 
         print("rec loss = ", rec_loss.item())
 
-        loss = rec_loss + vq_loss
-
-        print("total loss = ", loss.item())
+        loss = rec_loss
 
         optimizer.zero_grad()
         #scheduler.optimizer.zero_grad()
@@ -329,7 +380,7 @@ for epoch in range(epochs):
     print(f'Epoch: {epoch+1}, Loss: {loss.item():.4f}')
     #print(f'Epoch: {epoch + 1}, NMSE: {10*np.log10(loss.item()/norm(h_batch)**2):.4f} dB')
     outputs.append((epoch, h_batch, reconstructed_h))
-    losses.append(rec_loss.item())
+    losses.append(loss.item())
     print(outputs[-1])
 
 
@@ -342,12 +393,12 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 
 # SAVE THE PLOT
-plot_path = "VQ_CRNet_rec_loss.png"
+plot_path = "../../outputs/plots/FSQ_CsiNet_rec_loss.png"
 plt.savefig(plot_path)
 print(f"Plot saved to {plot_path}")
 
 # Save the losses to a text file
-losses_file_path = "VQ_CRNet_rec_losses.txt"
+losses_file_path = "../../outputs/logs/FSQ_CsiNet_rec_losses.txt"
 with open(losses_file_path, 'w') as f:
     for loss in losses:
         f.write(f"{loss}\n")
@@ -364,14 +415,13 @@ print("\nTraining time elapsed = ", end-start, " sec")
 # ====================================================================================================================================
 #SAVE MODEL
 
-model_path = "VQ_CRNet_path.pth"
+model_path = "../../outputs/models/FSQ_CsiNet_path.pth"
 torch.save(model.state_dict(), model_path)
 print(f"Model saved to {model_path}")
 
 # ====================================================================================================================================
 
 
-#Count model's parameters
 model_total_params = sum(p.numel() for p in model.parameters())
 model_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Model's total parameters = ", model_total_params)
@@ -379,19 +429,21 @@ print("Model's trainable parameters = ", model_trainable_params)
 
 
 
-# ===============================================================================================================================================
+
 # test (X test samples)
-num_test_samples = 10000
-print(f"TEST ({num_test_samples} TEST SAMPLES)")
+print("TEST (X TEST SAMPLES)")
+
+num_test_samples = 5000
 
 H_test = np.reshape(H_test[0:num_test_samples], (num_test_samples, 2, 32, 32))
 
-with torch.no_grad():
-    vq_loss_test, H_hat = model(H_test)
+H_hat, test_indices = model(H_test)
 
 H_test_real = np.reshape(H_test[:, 0, :, :], (len(H_test), -1))
 H_test_imag = np.reshape(H_test[:, 1, :, :], (len(H_test), -1))
 H_test_C = H_test_real - 0.5 + 1j * (H_test_imag - 0.5)
+
+#print("H TEST: ", H_test_C.shape)
 
 H_hat = H_hat.detach().numpy()
 H_hat = torch.from_numpy(H_hat.astype(np.float32))
@@ -399,16 +451,25 @@ H_hat_real = np.reshape(H_hat[:, 0, :, :], (len(H_hat), -1))
 H_hat_imag = np.reshape(H_hat[:, 1, :, :], (len(H_hat), -1))
 H_hat_C = H_hat_real - 0.5 + 1j * (H_hat_imag - 0.5)
 
+#print("H HAT: ", H_hat_C.shape)
+
 H_test_C = H_test_C.numpy()
 H_hat_C = H_hat_C.numpy()
 
+# power = np.mean(abs(H_test_C)**2, axis=1)
+power = np.linalg.norm(H_test_C) ** 2
+print("power = ", power)
 
+# MSE = np.sum(abs(H_test_C-H_hat_C)**2, axis=1)
 MSE = np.linalg.norm(H_test_C - H_hat_C) ** 2
 
-power = np.linalg.norm(H_test_C) ** 2
+print("MSE = ", MSE)
+#print(MSE.shape)
 
 NMSE = 10 * math.log10(np.mean(MSE / power))
 print("NMSE = ", NMSE, "dB")
+
+
 
 
 

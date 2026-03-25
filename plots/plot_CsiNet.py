@@ -3,6 +3,9 @@ from scipy.io import loadmat
 import torch
 import math
 import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../baselines/test'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../proposed_method/test'))
 import io
 import time
 import matplotlib.pyplot as plt
@@ -24,7 +27,7 @@ dataset_type = "Outdoor"
 # Data from COST2100
 
 if dataset_type == "Indoor":
-    test_data = loadmat('DATA_Htestin.mat')
+    test_data = loadmat('../data/DATA_Htestin.mat')
     H_test = test_data.get('HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
@@ -51,7 +54,7 @@ if dataset_type == "Indoor":
     
     
 if dataset_type == "Outdoor":
-    test_data = loadmat('DATA_Htestout.mat')
+    test_data = loadmat('../data/DATA_Htestout.mat')
     H_test = test_data.get('HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
@@ -185,10 +188,10 @@ buffer = io.StringIO()
 # Redirect stdout to the buffer to suppress prints
 sys.stdout = buffer
 
-import FSQ_AE_TEST
-import Vector_Quantization_AE_TEST
+import FSQ_CsiNet_TEST
+import VQ_CsiNet_TEST
 import OVQ_FSQ_TEST
-import OVQ_Scheme_New_TEST
+import OVQ_CsiNet_TEST
 #import FSQ_CRNet_TEST
 
 # Reset stdout to its original state
@@ -210,15 +213,15 @@ ovq_csinet_rho = []
 test_hetas = np.array([1/8, 1/4, 1/2, 3/4, 1])
 
 for test_heta in test_hetas:
-    fsq_csinet.append(NMSE(test_heta, FSQ_AE_TEST, True, False))
-    vq_csinet.append(NMSE(test_heta, Vector_Quantization_AE_TEST, False, False))
+    fsq_csinet.append(NMSE(test_heta, FSQ_CsiNet_TEST, True, False))
+    vq_csinet.append(NMSE(test_heta, VQ_CsiNet_TEST, False, False))
     ovq_fsq_csinet.append(NMSE(test_heta, OVQ_FSQ_TEST, True, True))
-    ovq_csinet.append(NMSE(test_heta, OVQ_Scheme_New_TEST, False, True))
+    ovq_csinet.append(NMSE(test_heta, OVQ_CsiNet_TEST, False, True))
 
-    fsq_csinet_rho.append(Cosine_similarity(test_heta, FSQ_AE_TEST, True, False))
-    vq_csinet_rho.append(Cosine_similarity(test_heta, Vector_Quantization_AE_TEST, False, False))
+    fsq_csinet_rho.append(Cosine_similarity(test_heta, FSQ_CsiNet_TEST, True, False))
+    vq_csinet_rho.append(Cosine_similarity(test_heta, VQ_CsiNet_TEST, False, False))
     ofsq_csinet_rho.append(Cosine_similarity(test_heta, OVQ_FSQ_TEST, True, True))
-    ovq_csinet_rho.append(Cosine_similarity(test_heta, OVQ_Scheme_New_TEST, False, True))
+    ovq_csinet_rho.append(Cosine_similarity(test_heta, OVQ_CsiNet_TEST, False, True))
 
 
 end = time.time()
@@ -254,7 +257,7 @@ plt.grid(True, which='both', linestyle='--', linewidth=0.6)
 plt.tight_layout()
 
 # Save plot
-plot_path = "CsiNet_PLOTS_NMSE_" + dataset_type + ".png"
+plot_path = "../outputs/plots/CsiNet_PLOTS_NMSE_" + dataset_type + ".png"
 plt.savefig(plot_path)
 
 
@@ -282,7 +285,7 @@ plt.grid(True, which='both', linestyle='--', linewidth=0.6)
 plt.tight_layout()
 
 # Save plot
-plot_path = "CsiNet_PLOTS_rho_" + dataset_type + ".png"
+plot_path = "../outputs/plots/CsiNet_PLOTS_rho_" + dataset_type + ".png"
 plt.savefig(plot_path)
 
 

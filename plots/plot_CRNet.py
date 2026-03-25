@@ -3,6 +3,9 @@ from scipy.io import loadmat
 import torch
 import math
 import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../baselines/test'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../proposed_method/test'))
 import io
 import time
 import matplotlib.pyplot as plt
@@ -25,7 +28,7 @@ dataset_type = "Outdoor"
 # Data from COST2100
 
 if dataset_type == "Indoor":
-    test_data = loadmat('DATA_Htestin.mat')
+    test_data = loadmat('../data/DATA_Htestin.mat')
     H_test = test_data.get('HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
@@ -52,7 +55,7 @@ if dataset_type == "Indoor":
     
     
 if dataset_type == "Outdoor":
-    test_data = loadmat('DATA_Htestout.mat')
+    test_data = loadmat('../data/DATA_Htestout.mat')
     H_test = test_data.get('HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
@@ -369,7 +372,7 @@ plt.grid(True, which='both', linestyle='--', linewidth=0.6)
 plt.tight_layout()
 
 # Save plot
-plot_path = "OVQ_CRNet_b_PLOTS_NMSE.png"
+plot_path = "../outputs/plots/OVQ_CRNet_b_PLOTS_NMSE.png"
 plt.savefig(plot_path)
 
 #Plotting rho
@@ -393,7 +396,7 @@ plt.grid(True, which='both', linestyle='--', linewidth=0.6)
 plt.tight_layout()
 
 # Save plot
-plot_path = "OVQ_CRNet_b_PLOTS_rho.png"
+plot_path = "../outputs/plots/OVQ_CRNet_b_PLOTS_rho.png"
 plt.savefig(plot_path)
 
 # Show the plots

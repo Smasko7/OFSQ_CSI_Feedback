@@ -33,7 +33,7 @@ dataset_type = "Outdoor"
 
 
 if dataset_type == "Indoor":
-    test_data = loadmat('DATA_Htestin.mat')
+    test_data = loadmat('../../data/DATA_Htestin.mat')
     H_test = test_data.get('HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
     # first 1024 columns (32X32): real part and the rest 1024 columns: imaginary part
@@ -55,7 +55,7 @@ if dataset_type == "Indoor":
 
 
 if dataset_type == "Outdoor":
-    test_data = loadmat('DATA_Htestout.mat')
+    test_data = loadmat('../../data/DATA_Htestout.mat')
     H_test = test_data.get(
         'HT')  # angular-delay channel matrix (after DFT transform --> from Nc' = 1024 subcarriers, we keep only the Nc = 32 first)
     # print(H_test.shape)   # (20000, 2048) --> 20000 samples and 2048 is 2 X 32 X 32, where 2 indicates the real and imaginary part (2 channels) and Nt = 32, Nc = 32
@@ -70,8 +70,6 @@ if dataset_type == "Outdoor":
     batch_size = 200  # number of samples per pass in training
 
 
-
-#__all__ = ["crnet"]
 
 
 class ConvBN(nn.Sequential):
@@ -161,8 +159,8 @@ class CRNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x, test_heta=0):
-        n, c, h, w = x.detach().size()  # batch_size,2,32,32
+    def forward(self, x, fine_tuning, test_heta=0):
+        N, c, h, w = x.detach().size()  # batch_size,2,32,32
 
         K = int(self.latent_dim / self.embedding_dim)
 
@@ -172,23 +170,28 @@ class CRNet(nn.Module):
         encode2 = self.encoder2(x)
         out = torch.cat((encode1, encode2), dim=1)
         out = self.encoder_conv(out)
-        out = self.encoder_fc(out.view(n, -1))    # shape: batch_size, 512
+        out = self.encoder_fc(out.view(N, -1))    # shape: batch_size, 512
 
         z = out.view(len(out), K, self.embedding_dim)
 
 
         #quantizer
         z_q, indices = self.FSQ_Quantizer(z)
+        n = np.random.randint(1, K + 1, z.shape[0])  # n ~ U(1,K) | z.shape[0] == batch_size
+
+        if fine_tuning == True:
+            for i in range(len(n)):
+                z_q[i, n[i]:K, :] = 0  # mask with zeros the last (K-n) vectors (n is the same for the specific sample)
+
 
         if test_heta != 0:
             z_q[:, int(test_heta*K) : K, :] = 0         # test_heta == η --> B = η * K * b = n' * b (n' : number of quantized vectors sent to BS for testing)
 
-
-        z_q = z_q.view(n,-1)
+        z_q = z_q.view(N,-1)
 
 
         #decoder
-        out = self.decoder_fc(z_q).view(n, c, h, w)
+        out = self.decoder_fc(z_q).view(N, c, h, w)
         out = self.decoder_feature(out)
 
         decoded = self.sigmoid(out)
@@ -196,15 +199,6 @@ class CRNet(nn.Module):
         return decoded, indices
 
 
-# def crnet(reduction=4):
-#     r""" Create a proposed CRNet.
-#
-#     :param reduction: the reciprocal of compression ratio
-#     :return: an instance of CRNet
-#     """
-#
-#     model = CRNet(reduction=reduction)
-#     return model
 
 reduction = 4  # from 2*32*32 = 2048 --> 512 (latent space)
 latent_dimension = 512
@@ -216,9 +210,9 @@ embedding_dimension = 4
 
 model = CRNet(reduction=reduction, latent_dim=latent_dimension, embedding_dim=embedding_dimension)
 
-model_path = "FSQ_CRNet_path_OUT_final.pth"
+model_path = "../../outputs/models/OFSQ_CRNet_path_OUT_final.pth"
 model.load_state_dict(torch.load(model_path))
-#model.eval()  # Set the model to evaluation mode (important for testing)
+model.eval()  # Set the model to evaluation mode (ignores batch normalizations etc)
 print(f"Model loaded from {model_path}")
 
 # ====================================================================================================================================
@@ -242,7 +236,7 @@ H_test = np.reshape(H_test[0:num_test_samples], (num_test_samples, 2, 32, 32))
 test_heta = 1
 
 with torch.no_grad():
-    H_hat, test_indices = model(H_test, test_heta)
+    H_hat, test_indices = model(H_test, False, test_heta)
 
 H_test_real = np.reshape(H_test[:, 0, :, :], (len(H_test), -1))
 H_test_imag = np.reshape(H_test[:, 1, :, :], (len(H_test), -1))
@@ -267,4 +261,26 @@ print("NMSE = ", NMSE, "dB")
 
 
 
+# Track codebook usage
+num_embeddings = 8*5*5*5  # Number of total codewords in the codebook
+used_codewords = torch.zeros(num_embeddings, device="cpu")  # Track usage of codewords
 
+with torch.no_grad():  # Testing, so no gradient needed
+    H_hat, test_indices = model(H_test, test_heta)
+
+    # Convert test_indices to CPU for processing
+    test_indices = test_indices.cpu().long()
+
+    # Flatten test_indices to count unique codewords across all samples
+    flat_indices = test_indices.view(-1)
+
+    # Mark used codewords in the codebook
+    used_codewords.scatter_(0, flat_indices, 1)  # Mark the used codewords
+
+# Calculate the total number of used codewords
+num_used_codewords = torch.sum(used_codewords).item()
+
+# Calculate the codebook usage as a fraction
+codebook_usage = num_used_codewords / num_embeddings
+
+print(f"Codebook Usage: {codebook_usage * 100:.2f}% ({num_used_codewords}/{num_embeddings} codewords used)")
